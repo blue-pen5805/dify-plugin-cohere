@@ -19,6 +19,17 @@ from cohere import (
     Tool,
     ToolCall,
     ToolParameterDefinitionsValue,
+    ChatMessageV2,
+    UserChatMessageV2,
+    AssistantChatMessageV2,
+    SystemChatMessageV2,
+    V2ChatResponse,
+    V2ChatStreamResponse,
+    ContentDeltaV2ChatStreamResponse,
+    MessageEndV2ChatStreamResponse,
+    ToolCallStartV2ChatStreamResponse,
+    ToolCallDeltaV2ChatStreamResponse,
+    ToolCallEndV2ChatStreamResponse,
 )
 from cohere.core import RequestOptions
 from dify_plugin.entities.model import AIModelEntity, FetchFrom, I18nObject, ModelType
@@ -327,7 +338,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
         :param user: unique user id
         :return: full response or stream response chunk generator result
         """
-        client = cohere.Client(
+        client = cohere.ClientV2(
             credentials.get("api_key"), base_url=credentials.get("base_url")
         )
         if stop:
@@ -338,8 +349,8 @@ class CohereLargeLanguageModel(LargeLanguageModel):
                     "Cohere tool call requires at least two tools to be specified."
                 )
             model_parameters["tools"] = self._convert_tools(tools)
-        (message, chat_histories, tool_results) = (
-            self._convert_prompt_messages_to_message_and_chat_histories(prompt_messages)
+        (chat_histories, tool_results) = (
+            self._convert_prompt_messages_to_chat_histories(prompt_messages)
         )
         if tool_results:
             model_parameters["tool_results"] = tool_results
@@ -351,8 +362,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
             real_model = model.removesuffix("-chat")
         if stream:
             response = client.chat_stream(
-                message=message,
-                chat_history=chat_histories,
+                messages=chat_histories,
                 model=real_model,
                 **model_parameters,
                 request_options=RequestOptions(max_retries=0),
@@ -362,8 +372,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
             )
         else:
             response = client.chat(
-                message=message,
-                chat_history=chat_histories,
+                messages=chat_histories,
                 model=real_model,
                 **model_parameters,
                 request_options=RequestOptions(max_retries=0),
@@ -376,7 +385,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
         self,
         model: str,
         credentials: dict,
-        response: NonStreamedChatResponse,
+        response: V2ChatResponse,
         prompt_messages: list[PromptMessage],
     ) -> LLMResult:
         """
@@ -388,10 +397,10 @@ class CohereLargeLanguageModel(LargeLanguageModel):
         :param prompt_messages: prompt messages
         :return: llm response
         """
-        assistant_text = response.text
+        assistant_text = response.message.content[0].text
         tool_calls = []
-        if response.tool_calls:
-            for cohere_tool_call in response.tool_calls:
+        if response.message.tool_calls:
+            for cohere_tool_call in response.message.tool_calls:
                 tool_call = AssistantPromptMessage.ToolCall(
                     id=cohere_tool_call.name,
                     type="function",
@@ -425,7 +434,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
         self,
         model: str,
         credentials: dict,
-        response: Iterator[StreamedChatResponse],
+        response: Iterator[V2ChatStreamResponse],
         prompt_messages: list[PromptMessage],
     ) -> Generator:
         """
@@ -469,10 +478,11 @@ class CohereLargeLanguageModel(LargeLanguageModel):
         index = 1
         full_assistant_content = ""
         tool_calls = []
+        current_tool_call = None
         for chunk in response:
-            if isinstance(chunk, TextGenerationStreamedChatResponse):
-                chunk = cast(TextGenerationStreamedChatResponse, chunk)
-                text = chunk.text
+            if isinstance(chunk, ContentDeltaV2ChatStreamResponse):
+                chunk = cast(ContentDeltaV2ChatStreamResponse, chunk)
+                text = chunk.delta.message.content.text
                 if text is None:
                     continue
                 assistant_prompt_message = AssistantPromptMessage(content=text)
@@ -485,29 +495,35 @@ class CohereLargeLanguageModel(LargeLanguageModel):
                     ),
                 )
                 index += 1
-            elif isinstance(chunk, ToolCallsGenerationStreamedChatResponse):
-                chunk = cast(ToolCallsGenerationStreamedChatResponse, chunk)
-                if chunk.tool_calls:
-                    for cohere_tool_call in chunk.tool_calls:
-                        tool_call = AssistantPromptMessage.ToolCall(
-                            id=cohere_tool_call.name,
-                            type="function",
-                            function=AssistantPromptMessage.ToolCall.ToolCallFunction(
-                                name=cohere_tool_call.name,
-                                arguments=json.dumps(cohere_tool_call.parameters),
-                            ),
-                        )
-                        tool_calls.append(tool_call)
-            elif isinstance(chunk, StreamEndStreamedChatResponse):
-                chunk = cast(StreamEndStreamedChatResponse, chunk)
+            elif isinstance(chunk, ToolCallStartV2ChatStreamResponse):
+                chunk = cast(ToolCallStartV2ChatStreamResponse, chunk)
+                current_tool_call = chunk.delta.message.tool_calls
+            elif isinstance(chunk, ToolCallDeltaV2ChatStreamResponse):
+                chunk = cast(ToolCallDeltaV2ChatStreamResponse, chunk)
+                if current_tool_call and chunk.delta.message.tool_calls:
+                    current_tool_call.function.arguments = current_tool_call.function.arguments + chunk.delta.message.tool_calls.function.arguments
+            elif isinstance(chunk, ToolCallEndV2ChatStreamResponse):
+                if current_tool_call:
+                    tool_call = AssistantPromptMessage.ToolCall(
+                        id=current_tool_call.id,
+                        type="function",
+                        function=AssistantPromptMessage.ToolCall.ToolCallFunction(
+                            name=current_tool_call.function.name,
+                            arguments=json.dumps(current_tool_call.function.arguments),
+                        ),
+                    )
+                    tool_calls.append(current_tool_call)
+                    current_tool_call = None
+            elif isinstance(chunk, MessageEndV2ChatStreamResponse):
+                chunk = cast(MessageEndV2ChatStreamResponse, chunk)
                 yield final_response(
-                    full_assistant_content, tool_calls, index, chunk.finish_reason
+                    full_assistant_content, tool_calls, index, chunk.delta.finish_reason
                 )
                 index += 1
 
-    def _convert_prompt_messages_to_message_and_chat_histories(
+    def _convert_prompt_messages_to_chat_histories(
         self, prompt_messages: list[PromptMessage]
-    ) -> tuple[str, list[ChatMessage], list[ToolResult]]:
+    ) -> tuple[list[ChatMessageV2], list[ToolResult]]:
         """
         Convert prompt messages to message and chat histories
         :param prompt_messages: prompt messages
@@ -530,7 +546,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
                             )
                         )
                 else:
-                    cohere_prompt_message = self._convert_prompt_message_to_dict(
+                    cohere_prompt_message = self._convert_prompt_message_to_dict_v2(
                         prompt_message
                     )
                     if cohere_prompt_message:
@@ -553,7 +569,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
                             break
                         i += 1
             else:
-                cohere_prompt_message = self._convert_prompt_message_to_dict(
+                cohere_prompt_message = self._convert_prompt_message_to_dict_v2(
                     prompt_message
                 )
                 if cohere_prompt_message:
@@ -564,12 +580,7 @@ class CohereLargeLanguageModel(LargeLanguageModel):
                 if tool_call_n_outputs.outputs:
                     new_latest_tool_call_n_outputs.append(tool_call_n_outputs)
             latest_tool_call_n_outputs = new_latest_tool_call_n_outputs
-        if len(chat_histories) > 0:
-            latest_message = chat_histories.pop()
-            message = latest_message.message
-        else:
-            raise ValueError("Prompt messages is empty")
-        return (message, chat_histories, latest_tool_call_n_outputs)
+        return (chat_histories, latest_tool_call_n_outputs)
 
     def _convert_prompt_message_to_dict(
         self, message: PromptMessage
@@ -598,6 +609,39 @@ class CohereLargeLanguageModel(LargeLanguageModel):
         elif isinstance(message, SystemPromptMessage):
             message = cast(SystemPromptMessage, message)
             chat_message = ChatMessage(role="USER", message=message.content)
+        elif isinstance(message, ToolPromptMessage):
+            return None
+        else:
+            raise ValueError(f"Got unknown type {message}")
+        return chat_message
+
+    def _convert_prompt_message_to_dict_v2(
+        self, message: PromptMessage
+    ) -> Optional[ChatMessageV2]:
+        """
+        Convert PromptMessage to dict for Cohere model
+        """
+        if isinstance(message, UserPromptMessage):
+            message = cast(UserPromptMessage, message)
+            if isinstance(message.content, str):
+                chat_message = UserChatMessageV2(content=message.content)
+            else:
+                sub_message_text = ""
+                for message_content in message.content:
+                    if message_content.type == PromptMessageContentType.TEXT:
+                        message_content = cast(
+                            TextPromptMessageContent, message_content
+                        )
+                        sub_message_text += message_content.data
+                chat_message = UserChatMessageV2(content=sub_message_text)
+        elif isinstance(message, AssistantPromptMessage):
+            message = cast(AssistantPromptMessage, message)
+            if not message.content:
+                return None
+            chat_message = AssistantChatMessageV2(content=message.content)
+        elif isinstance(message, SystemPromptMessage):
+            message = cast(SystemPromptMessage, message)
+            chat_message = SystemChatMessageV2(content=message.content)
         elif isinstance(message, ToolPromptMessage):
             return None
         else:
