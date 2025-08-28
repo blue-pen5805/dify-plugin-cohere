@@ -8,6 +8,7 @@ Based on version 0.0.8 of the official plugin.
 
 - Update cohere-python SDK and v2/chat endpoint support.
   - Support image input.
+    - Support JSON response format.
 - Add new models.
 - Remove old models.
 

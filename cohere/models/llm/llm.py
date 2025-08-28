@@ -27,6 +27,7 @@ from cohere import (
     V2ChatStreamResponse,
     ImageUrl,
     ImageUrlContent,
+    ResponseFormatV2,
     ContentDeltaV2ChatStreamResponse,
     MessageEndV2ChatStreamResponse,
     ToolCallStartV2ChatStreamResponse,
@@ -363,6 +364,20 @@ class CohereLargeLanguageModel(LargeLanguageModel):
             == FetchFrom.PREDEFINED_MODEL
         ):
             real_model = model.removesuffix("-chat")
+
+        if schema := model_parameters.pop("json_schema", None):
+            try:
+                schema = json.loads(schema)
+            except (TypeError, ValueError) as exc:
+                raise InvokeError("Invalid JSON Schema") from exc
+
+            model_parameters["response_format"] = {
+                "type": "json_object",
+                **schema,
+            }
+        elif model_parameters.pop("response_format", None) == "json_object":
+            model_parameters["response_format"] = {"type": "json_object"}
+
         if stream:
             response = client.chat_stream(
                 messages=chat_histories,
