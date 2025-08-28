@@ -25,6 +25,8 @@ from cohere import (
     SystemChatMessageV2,
     V2ChatResponse,
     V2ChatStreamResponse,
+    ImageUrl,
+    ImageUrlContent,
     ContentDeltaV2ChatStreamResponse,
     MessageEndV2ChatStreamResponse,
     ToolCallStartV2ChatStreamResponse,
@@ -47,6 +49,7 @@ from dify_plugin.entities.model.message import (
     PromptMessageTool,
     SystemPromptMessage,
     TextPromptMessageContent,
+    ImagePromptMessageContent,
     ToolPromptMessage,
     UserPromptMessage,
 )
@@ -633,6 +636,15 @@ class CohereLargeLanguageModel(LargeLanguageModel):
                             TextPromptMessageContent, message_content
                         )
                         sub_message_text += message_content.data
+                    elif message_content.type == PromptMessageContentType.IMAGE:
+                        message_content = cast(
+                            ImagePromptMessageContent, message_content
+                        )
+                        return UserChatMessageV2(
+                            content=[
+                                ImageUrlContent(image_url=ImageUrl(url=message_content.data))
+                            ]
+                        )
                 chat_message = UserChatMessageV2(content=sub_message_text)
         elif isinstance(message, AssistantPromptMessage):
             message = cast(AssistantPromptMessage, message)
